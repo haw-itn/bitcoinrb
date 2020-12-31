@@ -83,6 +83,20 @@ def create_test_utxo_db()
   Bitcoin::Store::UtxoDB.new(TEST_UTXO_DB_PATH)
 end
 
+def create_test_spv
+  block = double('block')
+  allow(block).to receive(:height).and_return(101)
+
+  chain = double('chain')
+  allow(chain).to receive(:latest_block).and_return(block)
+
+  spv = double('spv')
+  allow(spv).to receive(:chain).and_return(chain)
+  allow(spv).to receive(:broadcast).and_return(nil)
+  allow(spv).to receive(:add_observer).and_return(nil)
+  spv
+end
+
 module Bitcoin
   autoload :TestScriptParser, 'bitcoin/script/test_script_parser'
 end

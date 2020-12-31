@@ -7,9 +7,7 @@ module Bitcoin
       KEY_PREFIX = {
         out_point: 'o',        # key: out_point(tx_hash and index), value: Utxo
         script: 's',           # key: script_pubkey and out_point(tx_hash and index), value: Utxo
-        height: 'h',           # key: block_height and out_point, value: Utxo
         tx_hash: 't',          # key: tx_hash of transaction, value: [block_height, tx_index]
-        block: 'b',            # key: block_height and tx_index, value: tx_hash
         tx_payload: 'p',       # key: tx_hash, value: Tx
       }
 
@@ -51,9 +49,7 @@ module Bitcoin
           key = KEY_PREFIX[:tx_hash] + tx_hash
           level_db.put(key, [block_height, tx_index].pack('N2').bth)
 
-          # block_hash and tx_index -> tx_hash
-          key = KEY_PREFIX[:block] + [block_height, tx_index].pack('N2').bth
-          level_db.put(key, tx_hash)
+          update_utxo_height(tx_hash, block_height)
         end
       end
 
@@ -71,7 +67,6 @@ module Bitcoin
 
           # out_point
           key = KEY_PREFIX[:out_point] + out_point.to_hex
-          return if level_db.contains?(key)
           level_db.put(key, payload)
 
           # script_pubkey
@@ -79,14 +74,21 @@ module Bitcoin
             key = KEY_PREFIX[:script] + script_pubkey.to_hex + out_point.to_hex
             level_db.put(key, payload)
           end
-
-          # height
-          unless block_height.nil?
-            key = KEY_PREFIX[:height] + [block_height].pack('N').bth + out_point.to_hex
-            level_db.put(key, payload)
-          end
-
           utxo
+        end
+      end
+
+      # Update height in UTXO which have specified tx_hash
+      #
+      # @param [String] tx_hash
+      def update_utxo_height(tx_hash, block_height)
+        from = KEY_PREFIX[:out_point] + tx_hash + '00000000'
+        to = KEY_PREFIX[:out_point] + tx_hash + 'ffffffff'
+        # fetch utxos in tx
+        utxos = level_db.each(from: from, to: to).each do |k, v|
+          # update height only
+          utxo = Bitcoin::Wallet::Utxo.parse_from_payload(v)
+          save_utxo(Bitcoin::OutPoint.new(utxo.tx_hash, utxo.index), utxo.value, utxo.script_pubkey, block_height)
         end
       end
 
@@ -121,25 +123,6 @@ module Bitcoin
             level_db.delete(key)
           end
 
-          if utxo.block_height
-            # [:height]
-            key = KEY_PREFIX[:height] + [utxo.block_height].pack('N').bth + out_point.to_hex
-            level_db.delete(key)
-
-            # [:block]
-            key = KEY_PREFIX[:block] + [utxo.block_height, utxo.index].pack('N2').bth
-            level_db.delete(key)
-          end
-
-          # handles both [:tx_hash] and [:tx_payload]
-          if utxo.tx_hash
-            key = KEY_PREFIX[:tx_hash] + utxo.tx_hash
-            level_db.delete(key)
-
-            key = KEY_PREFIX[:tx_payload] + utxo.tx_hash
-            level_db.delete(key)
-          end
-
           utxo
         end
       end
@@ -161,7 +144,13 @@ module Bitcoin
         if addresses
           list_unspent_by_addresses(current_block_height, min: min, max: max, addresses: addresses)
         else
-          list_unspent_by_block_height(current_block_height, min: min, max: max)
+          max_height = [current_block_height - min, 0].max
+          min_height = [current_block_height - max, 0].max
+
+          # Retrieve all UTXOs in UtxoDB
+          from = KEY_PREFIX[:out_point] + '000000000000000000000000000000000000000000000000000000000000000000000000'
+          to = KEY_PREFIX[:out_point] + 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+          with_height(utxos_between(from, to), min_height, max_height)
         end
       end
 
@@ -193,18 +182,8 @@ module Bitcoin
         level_db.each(from: from, to: to).map { |k, v| Bitcoin::Wallet::Utxo.parse_from_payload(v) }
       end
 
-      class ::Array
-        def with_height(min, max)
-          select { |u| u.block_height >= min && u.block_height <= max }
-        end
-      end
-
-      def list_unspent_by_block_height(current_block_height, min: 0, max: 9999999)
-        max_height = [current_block_height - min, 0].max
-        min_height = [current_block_height - max, 0].max
-        from = KEY_PREFIX[:height] + [min_height].pack('N').bth + '000000000000000000000000000000000000000000000000000000000000000000000000'
-        to = KEY_PREFIX[:height] + [max_height].pack('N').bth + 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
-        utxos_between(from, to)
+      def with_height(utxos, min, max)
+        utxos.select { |u| u.block_height.nil? || (u.block_height >= min && u.block_height <= max) }
       end
 
       def list_unspent_by_addresses(current_block_height, min: 0, max: 9999999, addresses: [])
@@ -218,7 +197,7 @@ module Bitcoin
         script_pubkeys.map do |key|
           from = KEY_PREFIX[:script] + key + '000000000000000000000000000000000000000000000000000000000000000000000000'
           to = KEY_PREFIX[:script] + key + 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
-          utxos_between(from, to).with_height(min_height, max_height)
+          with_height(utxos_between(from, to), min_height, max_height)
         end.flatten
       end
     end
